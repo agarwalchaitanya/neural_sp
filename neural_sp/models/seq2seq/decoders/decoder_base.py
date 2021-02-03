@@ -44,10 +44,11 @@ class DecoderBase(ModelBase):
 
     def _plot_attention(self, save_path=None, n_cols=2):
         """Plot attention for each head in all decoder layers."""
-        if getattr(self, 'att_weight', 0) == 0 and getattr(self, 'rnnt_weight', 0) == 0:
-            return
         if not hasattr(self, 'aws_dict'):
             return
+        if len(self.aws_dict.keys()) == 0:
+            return
+
         from matplotlib import pyplot as plt
         from matplotlib.ticker import MaxNLocator
 
@@ -55,9 +56,6 @@ class DecoderBase(ModelBase):
         if save_path is not None and os.path.isdir(save_path):
             shutil.rmtree(save_path)
             os.mkdir(save_path)
-
-        if len(self.aws_dict.keys()) == 0:
-            return
 
         elens = self.data_dict['elens']
         ylens = self.data_dict['ylens']
@@ -142,12 +140,7 @@ class DecoderBase(ModelBase):
         Args:
             eouts (FloatTensor): `[B, T, enc_units]`
             elens (IntTensor): `[B]`
-            params (dict):
-                recog_beam_width (int): size of beam
-                recog_length_penalty (float): length penalty
-                recog_lm_weight (float): weight of first path LM score
-                recog_lm_second_weight (float): weight of second path LM score
-                recog_lm_rev_weight (float): weight of second path backward LM score
+            params (dict): decoding hyperparameters
             lm: firsh path LM
             lm_second: second path LM
             lm_second_bwd: second path backward LM
@@ -158,7 +151,7 @@ class DecoderBase(ModelBase):
                 which contains a list of length `[L]`
 
         """
-        if params['recog_beam_width'] == 1:
+        if params.get('recog_beam_width') == 1:
             nbest_hyps = self.ctc.greedy(eouts, elens)
         else:
             nbest_hyps = self.ctc.beam_search(eouts, elens, params, idx2token,

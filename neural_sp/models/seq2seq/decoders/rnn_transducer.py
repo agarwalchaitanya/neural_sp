@@ -403,7 +403,7 @@ class RNNTransducer(DecoderBase):
         Args:
             eouts (FloatTensor): `[B, T, enc_n_units]`
             elens (IntTensor): `[B]`
-            params (dict): hyperparameters for decoding
+            params (dict): decoding hyperparameters
             idx2token (): converter from index to token
             lm (torch.nn.module): firsh path LM
             lm_second (torch.nn.module): second path LM
@@ -425,16 +425,17 @@ class RNNTransducer(DecoderBase):
         """
         bs = eouts.size(0)
 
-        beam_width = params['recog_beam_width']
+        beam_width = params.get('recog_beam_width')
         assert 1 <= nbest <= beam_width
-        ctc_weight = params['recog_ctc_weight']
+        ctc_weight = params.get('recog_ctc_weight')
         assert ctc_weight == 0
         assert ctc_log_probs is None
-        lm_weight = params['recog_lm_weight']
-        lm_weight_second = params['recog_lm_second_weight']
-        lm_weight_second_bwd = params['recog_lm_bwd_weight']
-        # asr_state_carry_over = params['recog_asr_state_carry_over']
-        lm_state_carry_over = params['recog_lm_state_carry_over']
+        lm_weight = params.get('recog_lm_weight')
+        lm_weight_second = params.get('recog_lm_second_weight')
+        lm_weight_second_bwd = params.get('recog_lm_bwd_weight')
+        # asr_state_CO = params.get('recog_asr_state_carry_over')
+        lm_state_CO = params.get('recog_lm_state_carry_over')
+        softmax_smoothing = params.get('recog_softmax_smoothing')
         merge_prob = True  # TODO: make this parameter
 
         helper = BeamSearch(beam_width, self.eos, ctc_weight, eouts.device)
@@ -443,7 +444,6 @@ class RNNTransducer(DecoderBase):
         lm_second_bwd = helper.verify_lm_eval_mode(lm_second_bwd, lm_weight_second_bwd)
 
         nbest_hyps_idx = []
-        eos_flags = []
         for b in range(bs):
             # Initialization per utterance
             y = eouts.new_zeros((1, 1), dtype=torch.int64).fill_(self.eos)
@@ -453,7 +453,7 @@ class RNNTransducer(DecoderBase):
 
             if speakers is not None:
                 if speakers[b] == self.prev_spk:
-                    if lm_state_carry_over and isinstance(lm, RNNLM):
+                    if lm_state_CO and isinstance(lm, RNNLM):
                         lmstate = self.lmstate_final
                 self.prev_spk = speakers[b]
 
@@ -471,6 +471,7 @@ class RNNTransducer(DecoderBase):
                 # batchfy all hypotheses for batch decoding
                 douts = torch.cat([beam['dout'] for beam in hyps], dim=0)
                 logits = self.joint(eouts[b:b + 1, t:t + 1].repeat([douts.size(0), 1, 1]), douts)
+                logits = logits * softmax_smoothing
                 scores_rnnt = torch.log_softmax(logits.squeeze(2).squeeze(1), dim=-1)  # `[B, vocab]`
 
                 new_hyps = []
@@ -548,10 +549,8 @@ class RNNTransducer(DecoderBase):
             elif len(end_hyps) < nbest and nbest > 1:
                 end_hyps.extend(hyps[:nbest - len(end_hyps)])
 
-            # forward second path LM rescoring
+            # forward/backward second path LM rescoring
             helper.lm_rescoring(end_hyps, lm_second, lm_weight_second, tag='second')
-
-            # backward second path LM rescoring
             helper.lm_rescoring(end_hyps, lm_second_bwd, lm_weight_second_bwd, tag='second_bwd')
 
             # Sort by score
@@ -584,8 +583,5 @@ class RNNTransducer(DecoderBase):
 
             # N-best list
             nbest_hyps_idx += [[np.array(end_hyps[n]['hyp'][1:]) for n in range(nbest)]]
-
-            # Check <eos>
-            eos_flags.append([(end_hyps[n]['hyp'][-1] == self.eos) for n in range(nbest)])
 
         return nbest_hyps_idx, None, None

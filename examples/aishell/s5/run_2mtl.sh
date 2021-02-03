@@ -1,34 +1,41 @@
 #!/bin/bash
 
-# Copyright 2018 Kyoto University (Hirofumi Inaguma)
+# Copyright 2020 Kyoto University (Hirofumi Inaguma)
 #  Apache 2.0  (http://www.apache.org/licenses/LICENSE-2.0)
 
 echo ============================================================================
-echo "                                  TIMIT                                    "
+echo "                                AISHELL-1                                 "
 echo ============================================================================
 
-stage=0
+stage=-1
 stop_stage=5
 gpu=
 benchmark=true
 stdout=false
 
+### vocabulary
+unit=char
+unit_sub1=phone
+
 #########################
 # ASR configuration
 #########################
-conf=conf/blstm_ctc.yaml
+conf=conf/asr/blstm_las.yaml
+conf2=
+asr_init=
 
 ### path to save the model
-model=/n/work2/inaguma/results/timit
+model=/n/work2/inaguma/results/aishell1
 
 ### path to the model directory to resume training
 resume=
+lm_resume=
 
 ### path to save preproecssed data
-export data=/n/work2/inaguma/corpus/timit
+export data=/n/work2/inaguma/corpus/aishell1
 
-### path to original data
-TIMITDATATOP=/n/rd21/corpora_1/TIMIT
+# Base url for downloads.
+data_url=www.openslr.org/resources/33
 
 . ./cmd.sh
 . ./path.sh
@@ -45,18 +52,30 @@ if [ -z ${gpu} ]; then
 fi
 n_gpus=$(echo ${gpu} | tr "," "\n" | wc -l)
 
-train_set=train
-dev_set=dev
-test_set="test"
+train_set=train_sp
+dev_set=dev_sp
+test_set="test_sp"
+
+if [ ${stage} -le -1 ] && [ ${stop_stage} -ge -1 ]; then
+    echo "stage -1: Data Download"
+    mkdir -p ${data}
+    local/download_and_untar.sh ${data} ${data_url} data_aishell
+    local/download_and_untar.sh ${data} ${data_url} resource_aishell
+fi
 
 if [ ${stage} -le 0 ] && [ ${stop_stage} -ge 0 ] && [ ! -e ${data}/.done_stage_0 ]; then
     echo ============================================================================
     echo "                       Data Preparation (stage:0)                          "
     echo ============================================================================
 
-    mkdir -p ${data}
-    local/timit_data_prep.sh ${TIMITDATATOP} || exit 1;
-    local/timit_format_data.sh || exit 1;
+    local/aishell_data_prep.sh ${data}/data_aishell/wav ${data}/data_aishell/transcript
+    # remove space in text
+    for x in train dev test; do
+        cp ${data}/${x}/text ${data}/${x}/text.org
+        paste -d " " <(cut -f 1 -d" " ${data}/${x}/text.org) <(cut -f 2- -d" " ${data}/${x}/text.org | tr -d " ") \
+            > ${data}/${x}/text
+        rm ${data}/${x}/text.org
+    done
 
     touch ${data}/.done_stage_0 && echo "Finish data preparation (stage: 0)."
 fi
@@ -69,21 +88,26 @@ if [ ${stage} -le 1 ] && [ ${stop_stage} -ge 1 ] && [ ! -e ${data}/.done_stage_1
     for x in train dev test; do
         steps/make_fbank.sh --nj 32 --cmd "$train_cmd" --write_utt2num_frames true \
             ${data}/${x} ${data}/log/make_fbank/${x} ${data}/fbank || exit 1;
+        utils/fix_data_dir.sh ${data}/${x}
     done
+
+    speed_perturb_3way.sh ${data} train ${train_set}
+    cp -rf ${data}/dev ${data}/${dev_set}
+    cp -rf ${data}/test ${data}/${test_set}
 
     # Compute global CMVN
     compute-cmvn-stats scp:${data}/${train_set}/feats.scp ${data}/${train_set}/cmvn.ark || exit 1;
 
     # Apply global CMVN & dump features
-    dump_feat.sh --cmd "$train_cmd" --nj 80 --add_deltas true \
+    dump_feat.sh --cmd "$train_cmd" --nj 80 \
         ${data}/${train_set}/feats.scp ${data}/${train_set}/cmvn.ark ${data}/log/dump_feat/${train_set} ${data}/dump/${train_set} || exit 1;
     for x in ${dev_set} ${test_set}; do
         dump_dir=${data}/dump/${x}
-        dump_feat.sh --cmd "$train_cmd" --nj 32 --add_deltas true \
+        dump_feat.sh --cmd "$train_cmd" --nj 32 \
             ${data}/${x}/feats.scp ${data}/${train_set}/cmvn.ark ${data}/log/dump_feat/${x} ${dump_dir} || exit 1;
     done
 
-    touch ${data}/.done_stage_1 && echo "Finish feature extranction (stage: 1)."
+    touch ${data}/.done_stage_1
 fi
 
 dict=${data}/dict/${train_set}.txt; mkdir -p ${data}/dict
@@ -92,27 +116,45 @@ if [ ${stage} -le 2 ] && [ ${stop_stage} -ge 2 ] && [ ! -e ${data}/.done_stage_2
     echo "                      Dataset preparation (stage:2)                        "
     echo ============================================================================
 
-    echo "Making a dictionary..."
-    echo "<unk> 1" > ${dict}  # <unk> must be 1, 0 will be used for "blank" in CTC
-    echo "<eos> 2" >> ${dict}  # <sos> and <eos> share the same index
-    echo "<pad> 3" >> ${dict}
-    offset=$(cat ${dict} | wc -l)
-    text2dict.py ${data}/${train_set}/text --unit phone | \
-        awk -v offset=${offset} '{print $0 " " NR+offset}' >> ${dict} || exit 1;
-    echo "vocab size:" $(cat ${dict} | wc -l)
+    make_vocab.sh --unit ${unit} --speed_perturb true \
+        ${data} ${dict} ${data}/${train_set}/text || exit 1;
 
     echo "Making dataset tsv files for ASR ..."
     mkdir -p ${data}/dataset
     for x in ${train_set} ${dev_set} ${test_set}; do
         dump_dir=${data}/dump/${x}
-        make_dataset.sh --feat ${dump_dir}/feats.scp --unit phone \
+        make_dataset.sh --feat ${dump_dir}/feats.scp --unit ${unit} \
             ${data}/${x} ${dict} > ${data}/dataset/${x}.tsv || exit 1;
     done
 
     touch ${data}/.done_stage_2 && echo "Finish creating dataset for ASR (stage: 2)."
 fi
 
-# NOTE: skip LM training (stage:3)
+dict_sub1=${data}/dict/${train_set}_${unit_sub1}.txt; mkdir -p ${data}/dict
+if [ ${stage} -le 2 ] && [ ${stop_stage} -ge 2 ] && [ ! -e ${data}/.done_stage_2_${unit_sub1} ]; then
+    echo ============================================================================
+    echo "                      Dataset preparation (stage:2, sub1)                        "
+    echo ============================================================================
+
+    lexicon=${data}/resource_aishell/lexicon.txt
+    unk=sil
+    for x in ${train_set} ${dev_set} ${test_set}; do
+        map2phone.py --text ${data}/${x}/text --lexicon ${lexicon} --unk ${unk} --word_segmentation false \
+            > ${data}/${x}/text.phone
+    done
+    make_vocab.sh --unit ${unit_sub1} --speed_perturb true \
+        ${data} ${dict_sub1} ${data}/${train_set}/text.phone || exit 1;
+
+    echo "Making dataset tsv files for ASR ..."
+    for x in ${train_set} ${dev_set} ${test_set}; do
+        dump_dir=${data}/dump/${x}
+        make_dataset.sh --feat ${dump_dir}/feats.scp --unit ${unit_sub1} --text ${data}/${x}/text.phone \
+            ${data}/${x} ${dict_sub1} > ${data}/dataset/${x}_${unit_sub1}.tsv || exit 1;
+    done
+
+    touch ${data}/.done_stage_2_${unit_sub1} && echo "Finish creating dataset for ASR (stage: 2)."
+fi
+
 
 mkdir -p ${model}
 if [ ${stage} -le 4 ] && [ ${stop_stage} -ge 4 ]; then
@@ -121,17 +163,21 @@ if [ ${stage} -le 4 ] && [ ${stop_stage} -ge 4 ]; then
     echo ============================================================================
 
     CUDA_VISIBLE_DEVICES=${gpu} ${NEURALSP_ROOT}/neural_sp/bin/asr/train.py \
-        --corpus timit \
+        --corpus aishell1 \
         --config ${conf} \
+        --config2 ${conf2} \
         --n_gpus ${n_gpus} \
         --cudnn_benchmark ${benchmark} \
         --train_set ${data}/dataset/${train_set}.tsv \
+        --train_set_sub1 ${data}/dataset/${train_set}_${unit_sub1}.tsv \
         --dev_set ${data}/dataset/${dev_set}.tsv \
-        --eval_sets ${data}/dataset/${test_set}.tsv \
-        --unit phone \
+        --dev_set_sub1 ${data}/dataset/${dev_set}_${unit_sub1}.tsv \
+        --unit ${unit} \
+        --unit_sub1 ${unit_sub1} \
         --dict ${dict} \
+        --dict_sub1 ${dict_sub1} \
         --model_save_dir ${model}/asr \
-        --model ${model}/asr \
+        --asr_init ${asr_init} \
         --stdout ${stdout} \
         --resume ${resume} || exit 1;
 

@@ -4,7 +4,7 @@
 # Copyright 2018 Kyoto University (Hirofumi Inaguma)
 #  Apache 2.0  (http://www.apache.org/licenses/LICENSE-2.0)
 
-"""Plot the CTC posteriors."""
+"""Plot CTC posteriors."""
 
 import logging
 import os
@@ -42,12 +42,13 @@ def main():
         dataloader = build_dataloader(args=args,
                                       tsv_path=s,
                                       batch_size=1,
-                                      is_test=True)
+                                      is_test=True,
+                                      first_n_utterances=args.recog_first_n_utt)
 
         if i == 0:
-            # Load the ASR model
+            # Load ASR model
             model = Speech2Text(args, dir_name)
-            epoch = int(args.recog_model[0].split('-')[-1])
+            epoch = int(float(args.recog_model[0].split('-')[-1]) * 10) / 10
             if args.recog_n_average > 1:
                 # Model averaging for Transformer
                 model = average_checkpoints(model, args.recog_model[0],
@@ -76,7 +77,8 @@ def main():
 
         while True:
             batch, is_new_epoch = dataloader.next(recog_params['recog_batch_size'])
-            best_hyps_id, _ = model.decode(batch['xs'], recog_params, dataloader.idx2token[0])
+            nbest_hyps_id, _ = model.decode(batch['xs'], recog_params, dataloader.idx2token[0])
+            best_hyps_id = [h[0] for h in nbest_hyps_id]
 
             # Get CTC probs
             ctc_probs, topk_ids, xlens = model.get_ctc_probs(

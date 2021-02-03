@@ -4,7 +4,7 @@
 # Copyright 2018 Kyoto University (Hirofumi Inaguma)
 #  Apache 2.0  (http://www.apache.org/licenses/LICENSE-2.0)
 
-"""Plot attention weights of the attention model."""
+"""Plot attention weights of attention model."""
 
 import argparse
 import copy
@@ -46,12 +46,13 @@ def main():
         dataloader = build_dataloader(args=args,
                                       tsv_path=s,
                                       batch_size=1,
-                                      is_test=True)
+                                      is_test=True,
+                                      first_n_utterances=args.recog_first_n_utt)
 
         if i == 0:
-            # Load the ASR model
+            # Load ASR model
             model = Speech2Text(args, dir_name)
-            epoch = int(args.recog_model[0].split('-')[-1])
+            epoch = int(float(args.recog_model[0].split('-')[-1]) * 10) / 10
             if args.recog_n_average > 1:
                 # Model averaging for Transformer
                 model = average_checkpoints(model, args.recog_model[0],
@@ -74,7 +75,7 @@ def main():
                         model_e.cuda()
                     ensemble_models += [model_e]
 
-            # Load the LM for shallow fusion
+            # Load LM for shallow fusion
             if not args.lm_fusion:
                 # first path
                 if args.recog_lm is not None and args.recog_lm_weight > 0:
@@ -129,12 +130,13 @@ def main():
 
         while True:
             batch, is_new_epoch = dataloader.next(recog_params['recog_batch_size'])
-            best_hyps_id, aws = model.decode(
+            nbest_hyps_id, aws = model.decode(
                 batch['xs'], recog_params, dataloader.idx2token[0],
                 exclude_eos=False,
                 refs_id=batch['ys'],
                 ensemble_models=ensemble_models[1:] if len(ensemble_models) > 1 else [],
                 speakers=batch['sessions'] if dataloader.corpus == 'swbd' else batch['speakers'])
+            best_hyps_id = [h[0] for h in nbest_hyps_id]
 
             # Get CTC probs
             ctc_probs, topk_ids = None, None
